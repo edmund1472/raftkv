@@ -29,6 +29,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /kv/{key}", s.handleGet)
 	mux.HandleFunc("PUT /kv/{key}", s.handlePut)
 	mux.HandleFunc("DELETE /kv/{key}", s.handleDelete)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return mux
 }
 
@@ -74,4 +75,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleHealthz reports that the process is up and serving. Kubernetes polls
+// it to decide whether to restart the pod or send it traffic.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	io.WriteString(w, "ok")
 }

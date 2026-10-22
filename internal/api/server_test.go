@@ -75,3 +75,10 @@ func TestPutTooLarge(t *testing.T) {
 		t.Errorf("PUT oversized body: status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
 	}
 }
+
+func TestHealthz(t *testing.T) {
+	h := newTestHandler()
+	if rec := do(h, http.MethodGet, "/healthz", ""); rec.Code != http.StatusOK {
+		t.Errorf("GET /healthz: status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
