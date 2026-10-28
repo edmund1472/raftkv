@@ -1,0 +1,136 @@
+name: CI/CD
+
+# CI runs on every push and pull request. The deploy job runs only on pushes
+# to main, and only once the AWS_DEPLOY_ROLE_ARN repo variable is set (after
+# `terraform apply`), so the pipeline is green before any AWS account exists.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go tests (race detector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+      # -race reports any two goroutines touching the same memory without a
+      # lock. Those bugs depend on timing and almost never show up by hand.
+      - run: go test -race ./...
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t raftkv:ci .
+
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.0
+      - run: terraform fmt -recursive -check infra
+      # -backend=false: check the code without touching real state or AWS.
+      - name: Validate
+        run: |
+          for dir in infra/bootstrap infra/aws; do
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done
+
+  manifests:
+    name: Kubernetes manifests render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: kubectl kustomize deploy/k8s > /dev/null
+      - run: kubectl kustomize deploy/aws > /dev/null
+
+  deploy:
+    name: Deploy to EKS
+    needs: [go, docker, terraform, manifests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets the job request GitHub's OIDC token for AWS
+    # Never run two deploys at once; queue them instead.
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'raftkv' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Swaps GitHub's signed token for temporary AWS credentials. No AWS
+      # keys are stored in GitHub.
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tag with the commit SHA so every deploy is traceable to exact code
+      # and can be rolled back by redeploying an older SHA.
+      - name: Build and push image
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/raftkv:${{ github.sha }}
+        run: |
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+      - name: Apply manifests
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          cat >> deploy/aws/kustomization.yaml <<EOF
+          images:
+            - name: raftkv
+              newName: ${REGISTRY}/raftkv
+              newTag: ${GITHUB_SHA}
+          EOF
+          kubectl apply -k deploy/aws
+          kubectl rollout status statefulset/raftkv --timeout=5m
+
+      - name: Smoke test
+        run: |
+          kubectl port-forward svc/raftkv-client 8080:8080 &
+          for _ in $(seq 30); do
+            curl -sf localhost:8080/healthz && exit 0
+            sleep 1
+          done
+          echo "raftkv did not answer /healthz"
+          exit 1
+
+      - name: Show cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods,pvc -o wide || true
+          kubectl describe pod raftkv-0 || true
+          kubectl logs raftkv-0 --tail=50 || true

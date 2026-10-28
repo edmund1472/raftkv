@@ -1,0 +1,6 @@
+# AWS overlay: the base manifests plus what EKS needs. The deploy workflow
+# appends an `images:` entry here pointing raftkv:dev at the ECR image for
+# the commit being deployed.
+resources:
+  - ../k8s
+  - storageclass.yaml

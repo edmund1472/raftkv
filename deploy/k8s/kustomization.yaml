@@ -1,0 +1,4 @@
+# Base manifests, shared by every environment. Locally:
+#   kubectl apply -k deploy/k8s
+resources:
+  - raftkv.yaml

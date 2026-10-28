@@ -1,0 +1,19 @@
+# EKS no longer marks any StorageClass as the default, so without this the
+# raftkv PVC (which doesn't name a class) would stay Pending. gp3 EBS disks
+# are cheaper and faster than the older gp2.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+# Create the disk only once the pod is scheduled, in that pod's zone. An EBS
+# disk can only attach to a machine in the same availability zone.
+volumeBindingMode: WaitForFirstConsumer
+# Keep the disk (and the WAL on it) if the PVC is deleted by mistake.
+reclaimPolicy: Retain
+allowVolumeExpansion: true

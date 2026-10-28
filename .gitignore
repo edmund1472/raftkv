@@ -1,2 +1,8 @@
 LEARNING_LOG.md
 /data/
+
+# Terraform: provider downloads and state (state lives in S3; the bootstrap
+# state is local and must not be committed)
+.terraform/
+*.tfstate
+*.tfstate.*
